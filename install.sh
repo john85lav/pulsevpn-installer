@@ -258,28 +258,28 @@ display_results() {
     cat << EOF
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${GREEN}${BOLD}🎉 PulseVPN Server Installation Complete!${NC}
+${GREEN}${BOLD}🎉 CONGRATULATIONS! Your PulseVPN server is up and running.${NC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-${BLUE}📱 Configuration for your iOS app:${NC}
+${BLUE}To add this server to your PulseVPN iOS app, copy the following line:${NC}
 
-${BOLD}Server(ip: "$PUBLIC_IP", apiKey: "$API_KEY", name: "My PulseVPN Server")${NC}
+${BOLD}${GREEN}Server(ip: "$PUBLIC_IP", apiKey: "$API_KEY", port: $API_PORT, name: "My Server")${NC}
+
+${BLUE}Paste this line into your PulseVPN iOS app to connect.${NC}
 
 ${BLUE}🔧 Server Details:${NC}
-• API URL:      https://$PUBLIC_IP:$API_PORT
-• Shadowsocks:  $PUBLIC_IP:$SS_PORT
+• API URL:      http://$PUBLIC_IP:$API_PORT
+• Shadowsocks:  $PUBLIC_IP:$SS_PORT  
 • Method:       chacha20-ietf-poly1305
 
 ${BLUE}📊 Management Commands:${NC}
 • View logs:    docker logs -f $CONTAINER_NAME
 • Restart:      docker restart $CONTAINER_NAME
 • Stop:         docker stop $CONTAINER_NAME
-• Status:       docker ps | grep $CONTAINER_NAME
 
-${YELLOW}⚠️  Important Notes:${NC}
-• Save your API key securely - you'll need it for the iOS app
-• Make sure ports $API_PORT and $SS_PORT are open in your cloud firewall
-• The server will automatically restart on system reboot
+${YELLOW}⚠️  Make sure to open the following ports on your firewall:${NC}
+• Management port $API_PORT, for TCP
+• Access key port $SS_PORT, for TCP and UDP
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
