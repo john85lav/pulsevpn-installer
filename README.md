@@ -5,7 +5,7 @@ One-line installer for personal PulseVPN server with Shadowsocks protocol.
 ## Quick Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/johnBSlav/pulsevpn-installer/main/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/john85lav/pulsevpn-installer/main/install.sh | sudo bash
 ```
 
 ## Requirements
