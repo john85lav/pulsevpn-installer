@@ -84,6 +84,20 @@ generate_port() {
 }
 
 verify_docker() {
+    # Check if running on macOS
+    if [[ "$(uname)" == "Darwin" ]]; then
+        if command -v docker &> /dev/null; then
+            log_info "Docker is already installed"
+            return 0
+        else
+            log_error "This script requires a Linux server, not macOS"
+            log_error "Please run this on your VPS/server, not locally"
+            log_error "Example: ssh root@your-server-ip"
+            log_error "Then run: curl -sSL https://raw.githubusercontent.com/john85lav/pulsevpn-installer/main/install.sh | sudo bash"
+            exit 1
+        fi
+    fi
+
     if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
         log_info "Docker is already installed and running"
         return 0
@@ -122,6 +136,7 @@ setup_firewall() {
         iptables -I INPUT -p udp --dport "$SS_PORT" -j ACCEPT 2>/dev/null || true
         # Save iptables rules
         if command -v iptables-save &> /dev/null; then
+            mkdir -p /etc/iptables 2>/dev/null || true
             iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         fi
         log_info "iptables rules configured for ports $api_port and $SS_PORT"
@@ -201,11 +216,12 @@ install_pulsevpn() {
     fi
 
     log_info "Pulling PulseVPN Server image..."
-    if ! docker pull "$DOCKER_IMAGE" 2>/dev/null; then
+    local docker_image="$DOCKER_IMAGE"
+    if ! docker pull "$docker_image" 2>/dev/null; then
         log_warn "Could not pull image from registry"
         # Try to use a minimal shadowsocks container as fallback
-        DOCKER_IMAGE="shadowsocks/shadowsocks-libev:latest"
-        if ! docker pull "$DOCKER_IMAGE" 2>/dev/null; then
+        docker_image="shadowsocks/shadowsocks-libev:latest"
+        if ! docker pull "$docker_image" 2>/dev/null; then
             log_error "No suitable image found. Please ensure the PulseVPN image exists or build locally."
             exit 1
         fi
@@ -236,7 +252,7 @@ EOF
         -v "$CONFIG_DIR:/var/lib/pulsevpn" \
         -v "$CERT_FILE:/certs/cert.pem:ro" \
         -v "$KEY_FILE:/certs/key.pem:ro" \
-        "$DOCKER_IMAGE" >/dev/null 2>&1; then
+        "$docker_image" >/dev/null 2>&1; then
         log_info "Container started successfully"
     else
         log_error "Failed to start container"
@@ -321,7 +337,7 @@ ${YELLOW}⚠️  Make sure the following ports are open on your firewall:${NC}
 EOF
 
     log_step "PulseVPN JSON configuration"
-    local json_config="{\"server\":\"$PUBLIC_IP\",\"port\":$SS_PORT,\"password\":\"$API_KEY\",\"method\":\"chacha20-ietf-poly1305\",\"apiUrl\":\"https://$PUBLIC_IP:$API_PORT\",\"apiKey\":\"$API_KEY\",\"certSha256\":\"$CERT_SHA256\"}"
+    local json_config="{\"apiUrl\":\"https://$PUBLIC_IP:$API_PORT/$API_KEY\",\"certSha256\":\"$CERT_SHA256\"}"
     echo -e "${GREEN}$json_config${NC}"
 
     # Save configuration
@@ -338,8 +354,8 @@ CERT_SHA256=$CERT_SHA256
 # iOS Configuration:
 Server(ip: "$PUBLIC_IP", apiKey: "$API_KEY", port: $API_PORT, name: "My Server")
 
-# JSON Configuration:
-{"server":"$PUBLIC_IP","port":$SS_PORT,"password":"$API_KEY","method":"chacha20-ietf-poly1305","apiUrl":"https://$PUBLIC_IP:$API_PORT","apiKey":"$API_KEY","certSha256":"$CERT_SHA256"}
+# JSON Configuration (Outline-compatible):
+{"apiUrl":"https://$PUBLIC_IP:$API_PORT/$API_KEY","certSha256":"$CERT_SHA256"}
 
 # Shadowsocks Configuration:
 Server: $PUBLIC_IP
