@@ -279,29 +279,25 @@ EOF
 
     log_step "Waiting for server to start"
     local attempts=0
-    while [[ $attempts -lt 30 ]]; do
-        if docker ps --format "table {{.Names}}" | grep -q "^$CONTAINER_NAME$"; then
-            sleep 2
-            ((attempts++))
-            echo -n "."
-        else
+    while [[ $attempts -lt 15 ]]; do
+        if ! docker ps --format "table {{.Names}}" | grep -q "^$CONTAINER_NAME$"; then
             log_error "Container stopped unexpectedly"
             docker logs "$CONTAINER_NAME" 2>/dev/null || true
             exit 1
         fi
         
-        # Simple connectivity test based on image type
-        if [[ "$docker_image" == "shadowsocks/shadowsocks-libev:latest" ]]; then
-            # Test both shadowsocks ports
-            if timeout 5 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null || timeout 5 bash -c "</dev/tcp/localhost/$API_PORT" 2>/dev/null; then
-                break
-            fi
-        else
-            # Test original port
-            if timeout 5 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null; then
-                break
-            fi
+        # Simple connectivity test - check if either port responds
+        if timeout 2 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null; then
+            log_info "Shadowsocks port $SS_PORT is ready"
+            break
+        elif timeout 2 bash -c "</dev/tcp/localhost/$API_PORT" 2>/dev/null; then
+            log_info "API port $API_PORT is ready"
+            break
         fi
+        
+        sleep 2
+        ((attempts++))
+        echo -n "."
     done
     echo
 
