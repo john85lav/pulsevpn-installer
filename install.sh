@@ -292,8 +292,8 @@ EOF
         
         # Simple connectivity test based on image type
         if [[ "$docker_image" == "shadowsocks/shadowsocks-libev:latest" ]]; then
-            # Test shadowsocks port
-            if timeout 5 bash -c "</dev/tcp/localhost/$API_PORT" 2>/dev/null; then
+            # Test both shadowsocks ports
+            if timeout 5 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null || timeout 5 bash -c "</dev/tcp/localhost/$API_PORT" 2>/dev/null; then
                 break
             fi
         else
