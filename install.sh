@@ -219,34 +219,21 @@ install_pulsevpn() {
         docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
 
-    log_info "Pulling PulseVPN Server image..."
-    local docker_image="$DOCKER_IMAGE"
+    log_info "Using Outline-compatible Shadowbox server..."
+    
+    # Use Outline's Shadowbox image instead of plain Shadowsocks
+    local docker_image="quay.io/outline/shadowbox:stable"
+    
     if ! docker pull "$docker_image" 2>/dev/null; then
-        log_warn "Could not pull image from registry"
-        # Try to use a minimal shadowsocks container as fallback
+        log_warn "Could not pull Shadowbox image, falling back to Shadowsocks"
         docker_image="shadowsocks/shadowsocks-libev:latest"
+        
         if ! docker pull "$docker_image" 2>/dev/null; then
-            log_error "No suitable image found. Please ensure the PulseVPN image exists or build locally."
+            log_error "No suitable image found"
             exit 1
         fi
-        log_info "Using fallback Shadowsocks image"
-    fi
-
-    # Create a simple config for shadowsocks
-    cat > "$CONFIG_DIR/config.json" << EOF
-{
-    "server": "0.0.0.0",
-    "server_port": 2080,
-    "password": "$API_KEY",
-    "method": "chacha20-ietf-poly1305",
-    "timeout": 300,
-    "fast_open": true
-}
-EOF
-
-    # Start container with proper error handling
-    if [[ "$docker_image" == "shadowsocks/shadowsocks-libev:latest" ]]; then
-        # Special handling for Shadowsocks container
+        
+        # Shadowsocks-only setup
         if docker run -d \
             --name "$CONTAINER_NAME" \
             --restart unless-stopped \
@@ -255,26 +242,40 @@ EOF
             -p "${SS_PORT}:8388/udp" \
             "$docker_image" \
             ss-server -s 0.0.0.0 -p 8388 -k "$API_KEY" -m chacha20-ietf-poly1305 -v >/dev/null 2>&1; then
-            log_info "Container started successfully"
+            log_info "Shadowsocks container started successfully"
         else
             log_error "Failed to start container"
             exit 1
         fi
     else
-        # Original PulseVPN container handling
+        # Shadowbox setup with real API
+        mkdir -p "$CONFIG_DIR/shadowbox"
+        
+        # Create Shadowbox config
+        cat > "$CONFIG_DIR/shadowbox/config.json" << EOF
+{
+  "server": {
+    "port": 443
+  },
+  "keys": [],
+  "portForNewAccessKeys": $SS_PORT
+}
+EOF
+
         if docker run -d \
             --name "$CONTAINER_NAME" \
             --restart unless-stopped \
-            -p "${API_PORT}:9443" \
-            -p "${SS_PORT}:2080" \
-            -p "${SS_PORT}:2080/udp" \
-            -e "PULSE_SERVER_IP=$PUBLIC_IP" \
-            -e "PULSE_API_KEY=$API_KEY" \
-            -v "$CONFIG_DIR:/var/lib/pulsevpn" \
-            -v "$CERT_FILE:/certs/cert.pem:ro" \
-            -v "$KEY_FILE:/certs/key.pem:ro" \
+            -p "${API_PORT}:8081" \
+            -p "${SS_PORT}:$SS_PORT" \
+            -p "${SS_PORT}:$SS_PORT/udp" \
+            -v "$CONFIG_DIR/shadowbox:/opt/outline" \
+            -v "$CERT_FILE:/opt/outline/cert.pem:ro" \
+            -v "$KEY_FILE:/opt/outline/key.pem:ro" \
+            -e "SB_API_PORT=8081" \
+            -e "SB_CERTIFICATE_FILE=/opt/outline/cert.pem" \
+            -e "SB_PRIVATE_KEY_FILE=/opt/outline/key.pem" \
             "$docker_image" >/dev/null 2>&1; then
-            log_info "Container started successfully"
+            log_info "Shadowbox container started successfully"
         else
             log_error "Failed to start container"
             exit 1
