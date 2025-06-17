@@ -1,6 +1,6 @@
 # PulseVPN Server Installer
 
-One-line installer for personal PulseVPN server, compatible with Outline protocol.
+One-line installer for personal PulseVPN server with Shadowsocks protocol.
 
 ## Quick Install
 
@@ -33,9 +33,17 @@ After installation, you'll get:
 Server(ip: "YOUR_IP", apiKey: "YOUR_KEY", port: YOUR_PORT, name: "My Server")
 ```
 
-### For Outline Manager:
+### For any Shadowsocks client:
 ```json
-{"apiUrl":"https://YOUR_IP:PORT/API_KEY","certSha256":"CERT_HASH"}
+{
+  "server": "YOUR_IP",
+  "port": 2080,
+  "password": "YOUR_API_KEY",
+  "method": "chacha20-ietf-poly1305",
+  "apiUrl": "https://YOUR_IP:YOUR_API_PORT",
+  "apiKey": "YOUR_API_KEY",
+  "certSha256": "CERT_HASH"
+}
 ```
 
 ## Management
