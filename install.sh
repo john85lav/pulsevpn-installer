@@ -241,22 +241,40 @@ install_pulsevpn() {
 EOF
 
     # Start container with proper error handling
-    if docker run -d \
-        --name "$CONTAINER_NAME" \
-        --restart unless-stopped \
-        -p "${API_PORT}:9443" \
-        -p "${SS_PORT}:2080" \
-        -p "${SS_PORT}:2080/udp" \
-        -e "PULSE_SERVER_IP=$PUBLIC_IP" \
-        -e "PULSE_API_KEY=$API_KEY" \
-        -v "$CONFIG_DIR:/var/lib/pulsevpn" \
-        -v "$CERT_FILE:/certs/cert.pem:ro" \
-        -v "$KEY_FILE:/certs/key.pem:ro" \
-        "$docker_image" >/dev/null 2>&1; then
-        log_info "Container started successfully"
+    if [[ "$docker_image" == "shadowsocks/shadowsocks-libev:latest" ]]; then
+        # Special handling for Shadowsocks container
+        if docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            -p "${API_PORT}:8388" \
+            -p "${SS_PORT}:8388" \
+            -p "${SS_PORT}:8388/udp" \
+            "$docker_image" \
+            ss-server -s 0.0.0.0 -p 8388 -k "$API_KEY" -m chacha20-ietf-poly1305 -v >/dev/null 2>&1; then
+            log_info "Container started successfully"
+        else
+            log_error "Failed to start container"
+            exit 1
+        fi
     else
-        log_error "Failed to start container"
-        exit 1
+        # Original PulseVPN container handling
+        if docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            -p "${API_PORT}:9443" \
+            -p "${SS_PORT}:2080" \
+            -p "${SS_PORT}:2080/udp" \
+            -e "PULSE_SERVER_IP=$PUBLIC_IP" \
+            -e "PULSE_API_KEY=$API_KEY" \
+            -v "$CONFIG_DIR:/var/lib/pulsevpn" \
+            -v "$CERT_FILE:/certs/cert.pem:ro" \
+            -v "$KEY_FILE:/certs/key.pem:ro" \
+            "$docker_image" >/dev/null 2>&1; then
+            log_info "Container started successfully"
+        else
+            log_error "Failed to start container"
+            exit 1
+        fi
     fi
 
     log_step "Waiting for server to start"
@@ -272,9 +290,17 @@ EOF
             exit 1
         fi
         
-        # Simple connectivity test
-        if timeout 5 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null; then
-            break
+        # Simple connectivity test based on image type
+        if [[ "$docker_image" == "shadowsocks/shadowsocks-libev:latest" ]]; then
+            # Test shadowsocks port
+            if timeout 5 bash -c "</dev/tcp/localhost/$API_PORT" 2>/dev/null; then
+                break
+            fi
+        else
+            # Test original port
+            if timeout 5 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null; then
+                break
+            fi
         fi
     done
     echo
@@ -290,18 +316,34 @@ EOF
 test_installation() {
     log_step "Testing installation"
     
-    # Test shadowsocks port connectivity
-    if timeout 5 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null; then
-        log_info "✅ Shadowsocks port $SS_PORT is accessible"
-    else
-        log_warn "⚠️  Shadowsocks port $SS_PORT test failed"
-    fi
-    
     # Check container status
     if docker ps --format "table {{.Names}}" | grep -q "^$CONTAINER_NAME$"; then
         log_info "✅ Container is running"
     else
         log_warn "⚠️  Container status check failed"
+        return
+    fi
+    
+    # Test connectivity based on container type
+    if docker ps --format "table {{.Image}}" | grep -q "shadowsocks"; then
+        # Test shadowsocks ports
+        if timeout 5 bash -c "</dev/tcp/localhost/$API_PORT" 2>/dev/null; then
+            log_info "✅ Shadowsocks port $API_PORT is accessible"
+        else
+            log_warn "⚠️  Shadowsocks port $API_PORT test failed"
+        fi
+        if timeout 5 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null; then
+            log_info "✅ Shadowsocks port $SS_PORT is accessible"
+        else
+            log_warn "⚠️  Shadowsocks port $SS_PORT test failed"
+        fi
+    else
+        # Test original shadowsocks port
+        if timeout 5 bash -c "</dev/tcp/localhost/$SS_PORT" 2>/dev/null; then
+            log_info "✅ Shadowsocks port $SS_PORT is accessible"
+        else
+            log_warn "⚠️  Shadowsocks port $SS_PORT test failed"
+        fi
     fi
 }
 
