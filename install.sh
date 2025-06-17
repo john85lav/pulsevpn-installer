@@ -73,9 +73,9 @@ get_public_ip() {
 # Generate random API key (Outline-compatible length)
 generate_api_key() {
     if command -v openssl &> /dev/null; then
-        openssl rand -base64 16 | tr -d '\n'
+        openssl rand -base64 16 | tr -d '=\n'
     else
-        head -c 16 /dev/urandom | base64 | tr -d '\n'
+        head -c 16 /dev/urandom | base64 | tr -d '=\n'
     fi
 }
 
