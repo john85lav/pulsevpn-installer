@@ -375,8 +375,10 @@ ${YELLOW}⚠️  Make sure the following ports are open on your firewall:${NC}
 EOF
 
     log_step "PulseVPN JSON configuration"
+    echo
     local json_config="{\"apiUrl\":\"https://$PUBLIC_IP:$API_PORT/$API_KEY\",\"certSha256\":\"$CERT_SHA256\"}"
-    echo -e "${GREEN}$json_config${NC}"
+    echo -e "${BLUE}$json_config${NC}"
+    echo
 
     # Save configuration
     cat > "$CONFIG_DIR/config_summary.txt" << EOF
