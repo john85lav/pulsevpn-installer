@@ -125,15 +125,19 @@ setup_firewall() {
     log_step "Configuring firewall"
 
     if command -v ufw &> /dev/null; then
-        ufw --force enable 2>/dev/null || true
-        ufw allow "$api_port"/tcp 2>/dev/null || true
-        ufw allow "$SS_PORT"/tcp 2>/dev/null || true
-        ufw allow "$SS_PORT"/udp 2>/dev/null || true
-        log_info "UFW rules configured for ports $api_port and $SS_PORT"
-    elif command -v iptables &> /dev/null; then
+        # Disable UFW temporarily to avoid conflicts
+        ufw --force disable 2>/dev/null || true
+        log_info "UFW disabled to avoid port blocking"
+    fi
+    
+    if command -v iptables &> /dev/null; then
+        # Add rules to allow our ports
         iptables -I INPUT -p tcp --dport "$api_port" -j ACCEPT 2>/dev/null || true
         iptables -I INPUT -p tcp --dport "$SS_PORT" -j ACCEPT 2>/dev/null || true
         iptables -I INPUT -p udp --dport "$SS_PORT" -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+        
         # Save iptables rules
         if command -v iptables-save &> /dev/null; then
             mkdir -p /etc/iptables 2>/dev/null || true
