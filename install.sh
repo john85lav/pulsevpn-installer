@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # PulseVPN Server One-Line Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/johnBSlav/pulsevpn-installer/main/install.sh | sudo bash
+# Usage: curl -sSL https://raw.githubusercontent.com/john85lav/pulsevpn-installer/main/install.sh | sudo bash
 #
 
 set -euo pipefail
