@@ -128,6 +128,31 @@ if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
             exit 1
         fi
         
+        # Автоматически открываем порты в фаерволле
+        echo "🔓 Configuring firewall..."
+        
+        # UFW правила
+        if command -v ufw &> /dev/null; then
+            ufw allow $SHADOWSOCKS_PORT/tcp >/dev/null 2>&1 || true
+            ufw allow $SHADOWSOCKS_PORT/udp >/dev/null 2>&1 || true
+            ufw allow $API_PORT/tcp >/dev/null 2>&1 || true
+            echo "✅ UFW rules added for ports $SHADOWSOCKS_PORT, $API_PORT"
+        fi
+        
+        # iptables правила (fallback)
+        iptables -I INPUT -p tcp --dport $SHADOWSOCKS_PORT -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -p udp --dport $SHADOWSOCKS_PORT -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -p tcp --dport $API_PORT -j ACCEPT 2>/dev/null || true
+        
+        # Сохраняем iptables правила
+        if command -v iptables-save &> /dev/null; then
+            mkdir -p /etc/iptables 2>/dev/null || true
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || \
+            iptables-save > /etc/iptables.rules 2>/dev/null || true
+        fi
+        
+        echo "✅ Firewall configured"
+        
     else
         echo "❌ Failed to start container"
         exit 1
@@ -157,15 +182,63 @@ SSEOF
     cat > /opt/pulsevpn/manage.sh << 'MANAGEEOF'
 #!/bin/bash
 case "$1" in
-    start)   docker start pulsevpn-server && echo "✅ Started" ;;
-    stop)    docker stop pulsevpn-server && echo "⏹️ Stopped" ;;
-    restart) docker restart pulsevpn-server && echo "🔄 Restarted" ;;
-    logs)    docker logs -f pulsevpn-server ;;
-    status)  docker ps | grep pulsevpn-server || echo "❌ Not running" ;;
-    json)    cat /opt/pulsevpn/config.json ;;
-    config)  echo "=== Outline JSON ==="; cat /opt/pulsevpn/config.json; echo; echo "=== Shadowsocks ==="; cat /opt/pulsevpn/shadowsocks.json ;;
-    remove)  docker rm -f pulsevpn-server; rm -rf /opt/pulsevpn; echo "🗑️ Removed" ;;
-    *)       echo "Usage: $0 {start|stop|restart|logs|status|json|config|remove}" ;;
+    start)   
+        docker start pulsevpn-server && echo "✅ Started" 
+        ;;
+    stop)    
+        docker stop pulsevpn-server && echo "⏹️ Stopped" 
+        ;;
+    restart) 
+        docker restart pulsevpn-server && echo "🔄 Restarted" 
+        ;;
+    logs)    
+        docker logs -f pulsevpn-server 
+        ;;
+    status)  
+        if docker ps | grep -q pulsevpn-server; then
+            echo "✅ Running"
+            docker ps | grep pulsevpn-server
+            echo
+            echo "Ports:"
+            docker port pulsevpn-server
+        else
+            echo "❌ Not running"
+        fi
+        ;;
+    json)    
+        cat /opt/pulsevpn/config.json 
+        ;;
+    config)  
+        echo "=== Outline Manager JSON ==="
+        cat /opt/pulsevpn/config.json
+        echo
+        echo "=== Shadowsocks Direct ==="
+        cat /opt/pulsevpn/shadowsocks.json
+        echo
+        echo "=== Connection Test ==="
+        IPV4=$(curl -4 -s api.ipify.org 2>/dev/null || echo "unknown")
+        SS_PORT=$(docker port pulsevpn-server | grep '8388/tcp' | cut -d':' -f2)
+        echo "Test connection: telnet $IPV4 $SS_PORT"
+        ;;
+    test)
+        echo "🧪 Testing connection..."
+        IPV4=$(curl -4 -s api.ipify.org)
+        SS_PORT=$(docker port pulsevpn-server | grep '8388/tcp' | cut -d':' -f2)
+        if timeout 5 nc -zv $IPV4 $SS_PORT 2>/dev/null; then
+            echo "✅ Port $SS_PORT is accessible from outside"
+        else
+            echo "❌ Port $SS_PORT is not accessible. Check firewall."
+            echo "Try: ufw allow $SS_PORT"
+        fi
+        ;;
+    remove)  
+        docker rm -f pulsevpn-server
+        rm -rf /opt/pulsevpn
+        echo "🗑️ Removed" 
+        ;;
+    *)       
+        echo "Usage: $0 {start|stop|restart|logs|status|json|config|test|remove}" 
+        ;;
 esac
 MANAGEEOF
     chmod +x /opt/pulsevpn/manage.sh
@@ -186,7 +259,9 @@ MANAGEEOF
     echo "📊 Команды:"
     echo "• JSON:        /opt/pulsevpn/manage.sh json"
     echo "• Настройки:   /opt/pulsevpn/manage.sh config"
+    echo "• Тест связи:  /opt/pulsevpn/manage.sh test"
     echo "• Статус:      /opt/pulsevpn/manage.sh status"
+    echo "• Логи:        /opt/pulsevpn/manage.sh logs"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 else
