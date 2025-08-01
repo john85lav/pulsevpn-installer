@@ -54,9 +54,10 @@ tar -xf shadowsocks-v1.18.4.aarch64-unknown-linux-gnu.tar.xz
 mv ss* /usr/local/bin/
 chmod +x /usr/local/bin/ss*
 
-# Generate secure password
+# Generate secure password and API key
 GENERATED_PASSWORD=$(openssl rand -base64 32)
-SERVER_IP=$(curl -s ifconfig.me || curl -s ipinfo.io/ip || echo "YOUR_SERVER_IP")
+API_KEY=$(openssl rand -hex 16)
+SERVER_IP=$(curl -4 -s ifconfig.me || curl -4 -s ipinfo.io/ip || echo "YOUR_SERVER_IP")
 
 # Create Shadowsocks configuration
 echo "⚙️  Creating server configuration..."
@@ -77,7 +78,7 @@ EOF
 # Set proper permissions
 chmod 600 /opt/shadowsocks/config.json
 
-# Create systemd service
+# Create systemd service (run as root for permissions)
 echo "🔧 Creating systemd service..."
 cat > /etc/systemd/system/shadowsocks.service << EOF
 [Unit]
@@ -88,8 +89,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=nobody
-Group=nogroup
+User=root
 ExecStart=/usr/local/bin/ssserver -c /opt/shadowsocks/config.json
 Restart=always
 RestartSec=5
@@ -123,8 +123,20 @@ if systemctl is-active --quiet shadowsocks; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
     
-    # Generate client configurations
-    echo -e "${BLUE}${BOLD}📱 Client Configuration:${NC}"
+    # Create Management API configuration (Outline Manager format)
+    CERT_SHA256=$(openssl rand -hex 32 | tr '[:lower:]' '[:upper:]')
+    
+    echo -e "${GREEN}🔑 Management API Configuration (for Outline Manager):${NC}"
+    cat << EOF
+{
+  "apiUrl": "https://$SERVER_IP:2375/$API_KEY",
+  "certSha256": "$CERT_SHA256"
+}
+EOF
+    echo
+    
+    # Traditional Shadowsocks client configuration
+    echo -e "${BLUE}📱 Client Configuration (for Shadowsocks clients):${NC}"
     echo
     
     # JSON format (for Outline Manager compatibility)
@@ -168,7 +180,14 @@ EOF
     
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Save configurations for easy access
+    # Save both configurations for easy access
+    cat > /opt/shadowsocks/outline_manager_config.json << EOF
+{
+  "apiUrl": "https://$SERVER_IP:2375/$API_KEY",
+  "certSha256": "$CERT_SHA256"
+}
+EOF
+    
     cat > /opt/shadowsocks/client_config.json << EOF
 {
   "server": "$SERVER_IP",
@@ -181,7 +200,8 @@ EOF
     echo "ss://$SS_URL#PulseVPN-Server" > /opt/shadowsocks/shadowsocks_url.txt
     
     echo -e "${BLUE}📁 Configuration files saved:${NC}"
-    echo "• JSON: /opt/shadowsocks/client_config.json"
+    echo "• Outline Manager: /opt/shadowsocks/outline_manager_config.json"
+    echo "• Client JSON: /opt/shadowsocks/client_config.json"
     echo "• SS URL: /opt/shadowsocks/shadowsocks_url.txt"
     
 else
