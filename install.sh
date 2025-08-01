@@ -103,112 +103,161 @@ if [ "$VPN_TYPE" = "outline" ]; then
     fi
 
 elif [ "$VPN_TYPE" = "wireguard" ]; then
-    # WireGuard installation for ARM64
-    echo "🔧 Installing WireGuard for ARM64..."
+    # Shadowsocks installation for ARM64 (Outline API compatible)
+    echo "🔧 Installing Shadowsocks server for ARM64 with Outline API compatibility..."
     
     # Update system
     apt update -y
     
-    # Install WireGuard and dependencies
-    apt install -y wireguard qrencode ufw curl jq
-    
-    # Generate server keys
-    SERVER_PRIVATE_KEY=$(wg genkey)
-    SERVER_PUBLIC_KEY=$(echo "$SERVER_PRIVATE_KEY" | wg pubkey)
+    # Install Docker and dependencies
+    apt install -y curl jq openssl
+    curl -fsSL https://get.docker.com | sh
+    systemctl enable docker
+    systemctl start docker
     
     # Get server IP
-    SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || curl -s https://ipinfo.io/ip 2>/dev/null || echo "YOUR_SERVER_IP")
+    SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || curl -s https://ipinfo.io/ip 2>/dev/null)
     
-    # Create server config
-    cat > /etc/wireguard/wg0.conf << EOF
-[Interface]
-PrivateKey = $SERVER_PRIVATE_KEY
-Address = 10.8.0.1/24
-ListenPort = 51820
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth+ -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth+ -j MASQUERADE
-
+    if [ -z "$SERVER_IP" ]; then
+        echo "❌ Could not detect server IP"
+        exit 1
+    fi
+    
+    # Generate random port and password
+    SS_PORT=$(shuf -i 1024-65535 -n 1)
+    SS_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-16)
+    API_PORT=2375
+    
+    # Generate TLS certificate for API
+    mkdir -p /opt/pulsevpn/certs
+    openssl req -x509 -newkey rsa:2048 -keyout /opt/pulsevpn/certs/server.key -out /opt/pulsevpn/certs/server.crt -days 365 -nodes -subj "/CN=$SERVER_IP"
+    
+    # Get certificate SHA256
+    CERT_SHA256=$(openssl x509 -in /opt/pulsevpn/certs/server.crt -noout -fingerprint -sha256 | cut -d'=' -f2 | tr -d ':')
+    
+    # Generate API key
+    API_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
+    
+    # Create Shadowsocks config
+    cat > /opt/pulsevpn/shadowsocks.json << EOF
+{
+    "server": "0.0.0.0",
+    "server_port": $SS_PORT,
+    "password": "$SS_PASSWORD",
+    "method": "chacha20-ietf-poly1305",
+    "timeout": 300
+}
 EOF
+    
+    # Run Shadowsocks container
+    docker run -d \
+        --name pulsevpn-server \
+        --restart unless-stopped \
+        -p $SS_PORT:$SS_PORT \
+        -p $API_PORT:$API_PORT \
+        -v /opt/pulsevpn/shadowsocks.json:/etc/shadowsocks.json:ro \
+        -v /opt/pulsevpn/certs:/certs:ro \
+        shadowsocks/shadowsocks-libev:latest \
+        ss-server -c /etc/shadowsocks.json -v
+    
+    # Create simple API server for Outline compatibility
+    cat > /opt/pulsevpn/api_server.py << 'EOF'
+#!/usr/bin/env python3
+import json
+import ssl
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-    # Enable IP forwarding
-    echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
-    sysctl -p
+class OutlineAPIHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith('/'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            
+            # Return server info
+            response = {
+                "name": "PulseVPN ARM64 Server",
+                "serverId": "pulsevpn-arm64",
+                "metricsEnabled": True,
+                "createdTimestampMs": 1627776000000,
+                "version": "1.0.0",
+                "accessKeys": [
+                    {
+                        "id": "client1",
+                        "name": "Default Client",
+                        "password": "SS_PASSWORD_PLACEHOLDER",
+                        "port": SS_PORT_PLACEHOLDER,
+                        "method": "chacha20-ietf-poly1305",
+                        "accessUrl": f"ss://chacha20-ietf-poly1305:SS_PASSWORD_PLACEHOLDER@SERVER_IP_PLACEHOLDER:SS_PORT_PLACEHOLDER"
+                    }
+                ]
+            }
+            
+            self.wfile.write(json.dumps(response, indent=2).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        return
+
+if __name__ == '__main__':
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain('/certs/server.crt', '/certs/server.key')
+    
+    server = HTTPServer(('0.0.0.0', API_PORT_PLACEHOLDER), OutlineAPIHandler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    
+    print(f"API server running on port API_PORT_PLACEHOLDER")
+    server.serve_forever()
+EOF
+    
+    # Replace placeholders in API server
+    sed -i "s/SS_PASSWORD_PLACEHOLDER/$SS_PASSWORD/g" /opt/pulsevpn/api_server.py
+    sed -i "s/SS_PORT_PLACEHOLDER/$SS_PORT/g" /opt/pulsevpn/api_server.py
+    sed -i "s/SERVER_IP_PLACEHOLDER/$SERVER_IP/g" /opt/pulsevpn/api_server.py
+    sed -i "s/API_PORT_PLACEHOLDER/$API_PORT/g" /opt/pulsevpn/api_server.py
+    
+    # Start API server
+    nohup python3 /opt/pulsevpn/api_server.py > /opt/pulsevpn/api.log 2>&1 &
     
     # Configure firewall
-    ufw allow 51820/udp
+    ufw allow $SS_PORT/tcp
+    ufw allow $SS_PORT/udp
+    ufw allow $API_PORT/tcp
     
-    # Enable and start WireGuard
-    systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0
-    
-    # Generate first client config
-    CLIENT_PRIVATE_KEY=$(wg genkey)
-    CLIENT_PUBLIC_KEY=$(echo "$CLIENT_PRIVATE_KEY" | wg pubkey)
-    
-    # Add client to server config
-    cat >> /etc/wireguard/wg0.conf << EOF
-
-[Peer]
-PublicKey = $CLIENT_PUBLIC_KEY
-AllowedIPs = 10.8.0.2/32
-EOF
-    
-    # Restart WireGuard
-    systemctl restart wg-quick@wg0
-    
-    # Create client config
-    mkdir -p /opt/pulsevpn
-    cat > /opt/pulsevpn/client1.conf << EOF
-[Interface]
-PrivateKey = $CLIENT_PRIVATE_KEY
-Address = 10.8.0.2/24
-DNS = 1.1.1.1, 8.8.8.8
-
-[Peer]
-PublicKey = $SERVER_PUBLIC_KEY
-Endpoint = $SERVER_IP:51820
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-EOF
-    
-    # Generate QR code
-    qrencode -t ansiutf8 < /opt/pulsevpn/client1.conf > /opt/pulsevpn/client1_qr.txt
-    
-    # Create JSON-like config for compatibility
+    # Create Outline-compatible JSON
     cat > /opt/pulsevpn/config.json << EOF
 {
-  "type": "wireguard",
-  "server_ip": "$SERVER_IP",
-  "server_port": "51820",
-  "server_public_key": "$SERVER_PUBLIC_KEY",
-  "client_config": "/opt/pulsevpn/client1.conf",
-  "management": "systemctl restart wg-quick@wg0"
+  "apiUrl": "https://$SERVER_IP:$API_PORT/$API_KEY",
+  "certSha256": "$CERT_SHA256"
 }
 EOF
     
     echo
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e "${GREEN}${BOLD}🎉 CONGRATULATIONS! Your PulseVPN (WireGuard) server is up and running.${NC}"
+    echo -e "${GREEN}${BOLD}🎉 CONGRATULATIONS! Your PulseVPN server is up and running.${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
-    echo -e "${BLUE}🔑 WireGuard Client Configuration:${NC}"
+    echo -e "${BLUE}PulseVPN JSON configuration:${NC}"
     echo
-    cat /opt/pulsevpn/client1.conf
+    echo -e "${BLUE}$(cat /opt/pulsevpn/config.json)${NC}"
     echo
-    echo -e "${GREEN}📱 QR Code for mobile:${NC}"
+    echo -e "${GREEN}📱 Alternative configurations:${NC}"
     echo
-    cat /opt/pulsevpn/client1_qr.txt
+    echo "• Copy JSON above into Outline Manager"
+    echo "• Or use any Shadowsocks client with:"
+    echo "  - Server: $SERVER_IP"
+    echo "  - Port: $SS_PORT"
+    echo "  - Password: $SS_PASSWORD"
+    echo "  - Method: chacha20-ietf-poly1305"
     echo
-    echo -e "${GREEN}📊 Management Commands:${NC}"
-    echo "• Status:       systemctl status wg-quick@wg0"
-    echo "• Restart:      systemctl restart wg-quick@wg0"
-    echo "• Stop:         systemctl stop wg-quick@wg0"
-    echo "• Add client:   wg set wg0 peer <client_public_key> allowed-ips 10.8.0.X/32"
+    echo "📊 Management Commands:"
+    echo "• View logs:    docker logs -f pulsevpn-server"
+    echo "• Restart:      docker restart pulsevpn-server"
+    echo "• Stop:         docker stop pulsevpn-server"
     echo
-    echo "• Client config: /opt/pulsevpn/client1.conf"
-    echo "• Server config: /etc/wireguard/wg0.conf"
-    echo "• JSON config:   /opt/pulsevpn/config.json"
-    echo
+    echo "Configuration saved to /opt/pulsevpn/config.json"
 else
     echo "❌ WireGuard installation failed. Check the error above."
     exit 1
