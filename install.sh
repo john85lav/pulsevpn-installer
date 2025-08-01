@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-# PulseVPN Server Universal Installer (ARM64 + x86_64 support)
-# Usage: curl -sSL https://raw.githubusercontent.com/your-repo/pulsevpn-installer/main/install.sh | sudo bash
+# PulseVPN Server Universal Installer (x86_64 + ARM64)
+# Usage: curl -sSL https://raw.githubusercontent.com/john85lav/pulsevpn-installer/main/install.sh | sudo bash
 #
 set -euo pipefail
 
 # Colors
 readonly GREEN='\033[0;32m'
 readonly BLUE='\033[0;34m'
-readonly YELLOW='\033[1;33m'
+readonly YELLOW='\033[0;33m'
 readonly BOLD='\033[1m'
 readonly NC='\033[0m'
 
@@ -29,241 +29,137 @@ ARCH=$(uname -m)
 echo "🔍 Detected architecture: $ARCH"
 
 case $ARCH in
-    x86_64|amd64)
-        echo -e "${GREEN}✅ x86_64 architecture detected - using Outline installer${NC}"
+    x86_64)
+        echo "🚀 Installing PulseVPN server (Outline-based) for x86_64..."
         INSTALLER_URL="https://raw.githubusercontent.com/Jigsaw-Code/outline-apps/master/server_manager/install_scripts/install_server.sh"
-        VPN_TYPE="outline"
         ;;
     aarch64|arm64)
-        echo -e "${YELLOW}⚠️  ARM64 architecture detected - using WireGuard installer${NC}"
-        VPN_TYPE="wireguard"
+        echo "🚀 Installing PulseVPN server (Outline-based) for ARM64..."
+        # For ARM64, we use the same installer but need to handle potential issues
+        INSTALLER_URL="https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh"
+        echo -e "${YELLOW}Note: ARM64 support - using official Outline server installer${NC}"
         ;;
     *)
         echo "❌ Unsupported architecture: $ARCH"
-        echo "Supported: x86_64, amd64, aarch64, arm64"
+        echo "   Supported architectures: x86_64, aarch64 (ARM64)"
         exit 1
         ;;
 esac
 
-echo "🚀 Installing PulseVPN server ($VPN_TYPE-based)..."
-echo
-
 # Temporary file to capture output
 temp_file=$(mktemp)
 
-if [ "$VPN_TYPE" = "outline" ]; then
-    # Original Outline installation for x86_64
-    if sudo bash -c "$(wget -qO- $INSTALLER_URL)" 2>&1 | tee "$temp_file"; then
-        
-        echo
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${GREEN}${BOLD}🎉 CONGRATULATIONS! Your PulseVPN server is up and running.${NC}"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo
-        
-        # Extract JSON config
-        json_config=$(grep -o '{"apiUrl":"[^"]*","certSha256":"[^"]*"}' "$temp_file" | tail -1)
-        
-        if [ -n "$json_config" ]; then
-            echo -e "${BLUE}PulseVPN JSON configuration:${NC}"
-            echo
-            echo -e "${BLUE}$json_config${NC}"
-            echo
-            
-            # Extract server details
-            api_url=$(echo "$json_config" | grep -o '"apiUrl":"[^"]*"' | cut -d'"' -f4)
-            server_ip=$(echo "$api_url" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+')
-            
-            echo -e "${GREEN}📱 Alternative configurations:${NC}"
-            echo
-            echo "• Copy JSON above into Outline Manager"
-            echo "• Or use any Shadowsocks client with server: $server_ip"
-            echo
-            
-            # Rename container
-            docker rename shadowbox pulsevpn-server 2>/dev/null || true
-            
-            # Save config
-            mkdir -p /opt/pulsevpn
-            echo "$json_config" > /opt/pulsevpn/config.json
-            
-            echo "📊 Management Commands:"
-            echo "• View logs:    docker logs -f pulsevpn-server"
-            echo "• Restart:      docker restart pulsevpn-server"
-            echo "• Stop:         docker stop pulsevpn-server"
-            echo
-            echo "Configuration saved to /opt/pulsevpn/config.json"
-        else
-            echo "⚠️  Installation completed but JSON not found in output"
-            echo "Check the Outline installation output above for the configuration"
-        fi
-    else
-        echo "❌ Outline installation failed. Check the error above."
-        exit 1
-    fi
-
-elif [ "$VPN_TYPE" = "wireguard" ]; then
-    # Shadowsocks installation for ARM64 (Outline API compatible)
-    echo "🔧 Installing Shadowsocks server for ARM64 with Outline API compatibility..."
+# Ensure Docker is available for ARM64
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    echo "🔧 Preparing ARM64 environment..."
     
-    # Update system
-    apt update -y
+    # Update package list
+    apt-get update -qq
     
-    # Install Docker and dependencies
-    apt install -y curl jq openssl
-    curl -fsSL https://get.docker.com | sh
-    systemctl enable docker
-    systemctl start docker
-    
-    # Get server IP
-    SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || curl -s https://ipinfo.io/ip 2>/dev/null)
-    
-    if [ -z "$SERVER_IP" ]; then
-        echo "❌ Could not detect server IP"
-        exit 1
+    # Install Docker if not present
+    if ! command -v docker &> /dev/null; then
+        echo "📦 Installing Docker for ARM64..."
+        curl -fsSL https://get.docker.com | sh
+        systemctl enable docker
+        systemctl start docker
     fi
     
-    # Generate random port and password
-    SS_PORT=$(shuf -i 1024-65535 -n 1)
-    SS_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-16)
-    API_PORT=2375
-    
-    # Generate TLS certificate for API
-    mkdir -p /opt/pulsevpn/certs
-    openssl req -x509 -newkey rsa:2048 -keyout /opt/pulsevpn/certs/server.key -out /opt/pulsevpn/certs/server.crt -days 365 -nodes -subj "/CN=$SERVER_IP"
-    
-    # Get certificate SHA256
-    CERT_SHA256=$(openssl x509 -in /opt/pulsevpn/certs/server.crt -noout -fingerprint -sha256 | cut -d'=' -f2 | tr -d ':')
-    
-    # Generate API key
-    API_KEY=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-20)
-    
-    # Create Shadowsocks config
-    cat > /opt/pulsevpn/shadowsocks.json << EOF
-{
-    "server": "0.0.0.0",
-    "server_port": $SS_PORT,
-    "password": "$SS_PASSWORD",
-    "method": "chacha20-ietf-poly1305",
-    "timeout": 300
-}
-EOF
-    
-    # Run Shadowsocks container
-    docker run -d \
-        --name pulsevpn-server \
-        --restart unless-stopped \
-        -p $SS_PORT:$SS_PORT \
-        -p $API_PORT:$API_PORT \
-        -v /opt/pulsevpn/shadowsocks.json:/etc/shadowsocks.json:ro \
-        -v /opt/pulsevpn/certs:/certs:ro \
-        shadowsocks/shadowsocks-libev:latest \
-        ss-server -c /etc/shadowsocks.json -v
-    
-    # Create simple API server for Outline compatibility
-    cat > /opt/pulsevpn/api_server.py << 'EOF'
-#!/usr/bin/env python3
-import json
-import ssl
-from http.server import HTTPServer, BaseHTTPRequestHandler
+    # Check if ARM64 Docker images are available
+    echo "🔍 Verifying ARM64 Docker support..."
+    docker --version
+fi
 
-class OutlineAPIHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith('/'):
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            
-            # Return server info
-            response = {
-                "name": "PulseVPN ARM64 Server",
-                "serverId": "pulsevpn-arm64",
-                "metricsEnabled": True,
-                "createdTimestampMs": 1627776000000,
-                "version": "1.0.0",
-                "accessKeys": [
-                    {
-                        "id": "client1",
-                        "name": "Default Client",
-                        "password": "SS_PASSWORD_PLACEHOLDER",
-                        "port": SS_PORT_PLACEHOLDER,
-                        "method": "chacha20-ietf-poly1305",
-                        "accessUrl": f"ss://chacha20-ietf-poly1305:SS_PASSWORD_PLACEHOLDER@SERVER_IP_PLACEHOLDER:SS_PORT_PLACEHOLDER"
-                    }
-                ]
-            }
-            
-            self.wfile.write(json.dumps(response, indent=2).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-    
-    def log_message(self, format, *args):
-        return
-
-if __name__ == '__main__':
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain('/certs/server.crt', '/certs/server.key')
-    
-    server = HTTPServer(('0.0.0.0', API_PORT_PLACEHOLDER), OutlineAPIHandler)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-    
-    print(f"API server running on port API_PORT_PLACEHOLDER")
-    server.serve_forever()
-EOF
-    
-    # Replace placeholders in API server
-    sed -i "s/SS_PASSWORD_PLACEHOLDER/$SS_PASSWORD/g" /opt/pulsevpn/api_server.py
-    sed -i "s/SS_PORT_PLACEHOLDER/$SS_PORT/g" /opt/pulsevpn/api_server.py
-    sed -i "s/SERVER_IP_PLACEHOLDER/$SERVER_IP/g" /opt/pulsevpn/api_server.py
-    sed -i "s/API_PORT_PLACEHOLDER/$API_PORT/g" /opt/pulsevpn/api_server.py
-    
-    # Start API server
-    nohup python3 /opt/pulsevpn/api_server.py > /opt/pulsevpn/api.log 2>&1 &
-    
-    # Configure firewall
-    ufw allow $SS_PORT/tcp
-    ufw allow $SS_PORT/udp
-    ufw allow $API_PORT/tcp
-    
-    # Create Outline-compatible JSON
-    cat > /opt/pulsevpn/config.json << EOF
-{
-  "apiUrl": "https://$SERVER_IP:$API_PORT/$API_KEY",
-  "certSha256": "$CERT_SHA256"
-}
-EOF
+# Run installer and capture output
+echo "⚡ Running installer..."
+if wget -qO- "$INSTALLER_URL" | bash 2>&1 | tee "$temp_file"; then
     
     echo
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "${GREEN}${BOLD}🎉 CONGRATULATIONS! Your PulseVPN server is up and running.${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
-    echo -e "${BLUE}PulseVPN JSON configuration:${NC}"
-    echo
-    echo -e "${BLUE}$(cat /opt/pulsevpn/config.json)${NC}"
-    echo
-    echo -e "${GREEN}📱 Alternative configurations:${NC}"
-    echo
-    echo "• Copy JSON above into Outline Manager"
-    echo "• Or use any Shadowsocks client with:"
-    echo "  - Server: $SERVER_IP"
-    echo "  - Port: $SS_PORT"
-    echo "  - Password: $SS_PASSWORD"
-    echo "  - Method: chacha20-ietf-poly1305"
-    echo
-    echo "📊 Management Commands:"
-    echo "• View logs:    docker logs -f pulsevpn-server"
-    echo "• Restart:      docker restart pulsevpn-server"
-    echo "• Stop:         docker stop pulsevpn-server"
-    echo
-    echo "Configuration saved to /opt/pulsevpn/config.json"
+    
+    # Extract JSON config - improved regex for better matching
+    json_config=$(grep -oE '\{"apiUrl":"[^"]*","certSha256":"[^"]*"\}' "$temp_file" | tail -1)
+    
+    # Alternative extraction if first method fails
+    if [ -z "$json_config" ]; then
+        json_config=$(grep -A 10 -B 5 "apiUrl" "$temp_file" | grep -oE '\{[^}]*"apiUrl"[^}]*\}' | tail -1)
+    fi
+    
+    if [ -n "$json_config" ]; then
+        echo -e "${BLUE}${BOLD}PulseVPN JSON configuration:${NC}"
+        echo
+        echo -e "${GREEN}$json_config${NC}"
+        echo
+        
+        # Extract server details for manual configuration
+        api_url=$(echo "$json_config" | grep -o '"apiUrl":"[^"]*"' | cut -d'"' -f4)
+        server_ip=$(echo "$api_url" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+        
+        echo -e "${BLUE}📱 Client Setup:${NC}"
+        echo "• Download Outline Manager: https://getoutline.org/get-started/#step-3"
+        echo "• Copy JSON configuration above into Outline Manager"
+        echo "• Or use any Shadowsocks client with server: $server_ip"
+        echo
+        
+        # Rename container for better identification
+        if docker ps -a | grep -q shadowbox; then
+            docker rename shadowbox pulsevpn-server 2>/dev/null || true
+            echo "📦 Docker container renamed to: pulsevpn-server"
+        fi
+        
+        # Save config
+        mkdir -p /opt/pulsevpn
+        echo "$json_config" > /opt/pulsevpn/config.json
+        chmod 600 /opt/pulsevpn/config.json
+        
+        echo
+        echo -e "${GREEN}📊 Management Commands:${NC}"
+        echo "• View logs:    docker logs -f pulsevpn-server"
+        echo "• Restart:      docker restart pulsevpn-server"
+        echo "• Stop:         docker stop pulsevpn-server"
+        echo "• Status:       docker ps | grep pulsevpn"
+        echo
+        echo "• Configuration file: /opt/pulsevpn/config.json"
+        
+        # Open firewall ports
+        echo "🔥 Configuring firewall..."
+        if command -v ufw &> /dev/null; then
+            # Get the port from API URL or use default
+            outline_port=$(echo "$api_url" | grep -oE ':[0-9]+' | cut -d':' -f2)
+            if [ -n "$outline_port" ]; then
+                ufw allow "$outline_port" 2>/dev/null || true
+                echo "• Opened port: $outline_port"
+            fi
+        fi
+        
+    else
+        echo -e "${YELLOW}⚠️  Installation completed but JSON configuration not extracted${NC}"
+        echo "Please check the installation output above for the configuration details"
+        echo
+        echo "You can also check Docker containers:"
+        echo "docker ps"
+        echo "docker logs shadowbox"
+    fi
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${GREEN}${BOLD}✅ Installation completed successfully!${NC}"
+    echo "Architecture: $ARCH"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
 else
-    echo "❌ WireGuard installation failed. Check the error above."
+    echo
+    echo "❌ Installation failed. Check the error above."
+    echo "Full log available at: $temp_file"
     exit 1
 fi
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
 # Cleanup
 rm -f "$temp_file"
+
+echo
+echo -e "${BLUE}🔗 Useful links:${NC}"
+echo "• Outline Manager: https://getoutline.org/get-started/"
+echo "• Outline clients: https://getoutline.org/get-started/#step-3"
+echo "• Support: https://support.getoutline.org/"
