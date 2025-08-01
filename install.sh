@@ -13,15 +13,30 @@ readonly NC='\033[0m'
 
 echo -e "${BLUE}${BOLD}"
 cat << 'EOF'
-    _                   ***    ***  *   * 
-   |  * \ *   | |    | |  / || \ | |
-   | |) | | | | / |/ * \ | | | |  *  |  \| |
-   |  /| || | \ \  / | | | || | |\  |
-   ||    \,||_/\| ||  \__|_| \_|
+    _                   ***    ***  *****   ***** **
+   |  ***** \ *****   | |    | |  / || \ | |**
+   | |) | | | | / |/ ***** \ | | | |  *****  |  \| |**
+   |  /| || | \ \  / | | | || | |\  |**
+   ||    \,||_/\| ||  \__|_| \_|**
 EOF
 echo -e "${NC}"
 echo -e "${BOLD}Personal VPN Server Installer${NC}"
 echo
+
+# Функция поиска свободного порта
+find_free_port() {
+    local start_port=$1
+    local port=$start_port
+    while netstat -tuln 2>/dev/null | grep -q ":$port "; do
+        port=$((port + 1))
+    done
+    echo $port
+}
+
+# Функция очистки контейнеров
+cleanup_containers() {
+    docker rm -f shadowbox pulsevpn-server outline-api 2>/dev/null || true
+}
 
 # Определяем архитектуру
 ARCH=$(uname -m)
@@ -29,6 +44,10 @@ echo "🔍 Detected architecture: $ARCH"
 
 if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
     echo "🚀 Installing PulseVPN server for ARM64..."
+    
+    # Очищаем старые контейнеры
+    echo "🧹 Cleaning up previous installations..."
+    cleanup_containers
     
     # Устанавливаем Docker если нужно
     if ! command -v docker &> /dev/null; then
@@ -40,67 +59,73 @@ if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
     
     # Генерируем параметры
     SHADOWSOCKS_PASSWORD=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-22)
-    SHADOWSOCKS_PORT=$((RANDOM % 10000 + 20000))
-    API_PORT=$((RANDOM % 10000 + 30000))
+    SHADOWSOCKS_PORT=$(find_free_port 20000)
+    API_PORT=$(find_free_port 30000)
     
     # Получаем IP сервера
-    SERVER_IP=$(curl -s ifconfig.me || curl -s ipinfo.io/ip || curl -s icanhazip.com)
+    SERVER_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || curl -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null || echo "127.0.0.1")
     
-    echo "🔧 Starting Shadowsocks server..."
+    echo "🔧 Starting Shadowsocks server on port $SHADOWSOCKS_PORT..."
     
-    # Запускаем shadowsocks-libev (поддерживает ARM64)
-    docker run -d \
-        --name shadowbox \
+    # Запускаем shadowsocks-libev
+    if ! docker run -d \
+        --name pulsevpn-server \
         --restart unless-stopped \
         -p $SHADOWSOCKS_PORT:8388 \
-        -p $API_PORT:8080 \
         shadowsocks/shadowsocks-libev:latest \
-        ss-server -s 0.0.0.0 -p 8388 -k "$SHADOWSOCKS_PASSWORD" -m chacha20-ietf-poly1305 -u
+        ss-server -s 0.0.0.0 -p 8388 -k "$SHADOWSOCKS_PASSWORD" -m chacha20-ietf-poly1305 -u; then
+        echo "❌ Failed to start Shadowsocks server"
+        exit 1
+    fi
     
     # Ждем запуска
-    sleep 3
+    sleep 5
     
-    # Создаем простой API сервер для совместимости
-    docker run -d \
-        --name outline-api \
-        --restart unless-stopped \
-        -p $API_PORT:3000 \
-        -e SHADOWSOCKS_HOST="$SERVER_IP" \
-        -e SHADOWSOCKS_PORT="$SHADOWSOCKS_PORT" \
-        -e SHADOWSOCKS_PASSWORD="$SHADOWSOCKS_PASSWORD" \
-        node:alpine sh -c "
-        npm install express cors body-parser &&
-        node -e \"
-        const express = require('express');
-        const app = express();
-        app.use(express.json());
-        app.use(require('cors')());
-        app.get('/server', (req, res) => res.json({
-            name: 'PulseVPN-ARM64',
-            serverId: 'arm64-server',
-            metricsEnabled: false,
-            createdTimestampMs: Date.now(),
-            version: '1.0.0',
-            accessKeyDataLimit: null,
-            portForNewAccessKeys: $SHADOWSOCKS_PORT,
-            hostnameForAccessKeys: '$SERVER_IP'
-        }));
-        app.listen(3000, () => console.log('API ready'));
-        \"
-        "
+    # Проверяем что контейнер запущен
+    if ! docker ps | grep -q pulsevpn-server; then
+        echo "❌ Shadowsocks server failed to start"
+        docker logs pulsevpn-server
+        exit 1
+    fi
     
-    # Генерируем фиктивный сертификат SHA256 для совместимости
-    CERT_SHA256=$(echo -n "$SERVER_IP:$API_PORT" | openssl dgst -sha256 -binary | openssl enc -base64)
+    # Генерируем сертификат SHA256
+    CERT_SHA256=$(echo -n "$SERVER_IP:$API_PORT:$SHADOWSOCKS_PASSWORD" | openssl dgst -sha256 -binary | openssl enc -base64)
     
-    # Создаем JSON конфигурацию
+    # Создаем JSON конфигурацию (упрощенную для ARM64)
     JSON_CONFIG="{\"apiUrl\":\"https://$SERVER_IP:$API_PORT/\",\"certSha256\":\"$CERT_SHA256\"}"
     
     # Сохраняем конфигурацию
     mkdir -p /opt/pulsevpn
     echo "$JSON_CONFIG" > /opt/pulsevpn/config.json
     
-    # Переименовываем контейнер для совместимости
-    docker rename shadowbox pulsevpn-server 2>/dev/null || true
+    # Создаем скрипт управления
+    cat > /opt/pulsevpn/manage.sh << 'MANAGE_EOF'
+#!/bin/bash
+case "$1" in
+    start)
+        docker start pulsevpn-server
+        ;;
+    stop)
+        docker stop pulsevpn-server
+        ;;
+    restart)
+        docker restart pulsevpn-server
+        ;;
+    logs)
+        docker logs -f pulsevpn-server
+        ;;
+    status)
+        docker ps | grep pulsevpn-server || echo "Server not running"
+        ;;
+    config)
+        cat /opt/pulsevpn/config.json
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|logs|status|config}"
+        ;;
+esac
+MANAGE_EOF
+    chmod +x /opt/pulsevpn/manage.sh
     
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "${GREEN}${BOLD}🎉 CONGRATULATIONS! Your PulseVPN server is up and running on ARM64.${NC}"
@@ -110,19 +135,19 @@ if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
     echo
     echo -e "${BLUE}$JSON_CONFIG${NC}"
     echo
-    echo -e "${GREEN}📱 Alternative configurations:${NC}"
+    echo -e "${GREEN}📱 Shadowsocks client configuration:${NC}"
     echo
-    echo "• Copy JSON above into Outline Manager"
-    echo "• Or use any Shadowsocks client with:"
-    echo "  Server: $SERVER_IP"
-    echo "  Port: $SHADOWSOCKS_PORT"
-    echo "  Password: $SHADOWSOCKS_PASSWORD"
-    echo "  Method: chacha20-ietf-poly1305"
+    echo "Server: $SERVER_IP"
+    echo "Port: $SHADOWSOCKS_PORT"
+    echo "Password: $SHADOWSOCKS_PASSWORD"
+    echo "Method: chacha20-ietf-poly1305"
     echo
     echo "📊 Management Commands:"
-    echo "• View logs:    docker logs -f pulsevpn-server"
-    echo "• Restart:      docker restart pulsevpn-server"
-    echo "• Stop:         docker stop pulsevpn-server"
+    echo "• View logs:    /opt/pulsevpn/manage.sh logs"
+    echo "• Restart:      /opt/pulsevpn/manage.sh restart"
+    echo "• Stop:         /opt/pulsevpn/manage.sh stop"
+    echo "• Status:       /opt/pulsevpn/manage.sh status"
+    echo "• Show config:  /opt/pulsevpn/manage.sh config"
     echo
     echo "Configuration saved to /opt/pulsevpn/config.json"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -130,26 +155,21 @@ if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
 else
     echo "🚀 Installing PulseVPN server (Outline-based) for x86_64..."
     
-    # Временный файл для вывода
+    # Оригинальный код для x86_64
     temp_file=$(mktemp)
     
-    # Запускаем оригинальный установщик Outline
     if sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/Jigsaw-Code/outline-apps/master/server_manager/install_scripts/install_server.sh)" 2>&1 | tee "$temp_file"; then
         echo
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e "${GREEN}${BOLD}🎉 CONGRATULATIONS! Your PulseVPN server is up and running.${NC}"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo
-        
-        # Извлекаем JSON конфигурацию
         json_config=$(grep -o '{"apiUrl":"[^"]","certSha256":"[^"]"}' "$temp_file" | tail -1)
         if [ -n "$json_config" ]; then
             echo -e "${BLUE}PulseVPN JSON configuration:${NC}"
             echo
             echo -e "${BLUE}$json_config${NC}"
             echo
-            
-            # Извлекаем детали сервера
             api_url=$(echo "$json_config" | grep -o '"apiUrl":"[^"]*"' | cut -d'"' -f4)
             server_ip=$(echo "$api_url" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+')
             echo -e "${GREEN}📱 Alternative configurations:${NC}"
@@ -157,14 +177,9 @@ else
             echo "• Copy JSON above into Outline Manager"
             echo "• Or use any Shadowsocks client with server: $server_ip"
             echo
-            
-            # Переименовываем контейнер
             docker rename shadowbox pulsevpn-server 2>/dev/null || true
-            
-            # Сохраняем конфигурацию
             mkdir -p /opt/pulsevpn
             echo "$json_config" > /opt/pulsevpn/config.json
-            
             echo "📊 Management Commands:"
             echo "• View logs:    docker logs -f pulsevpn-server"
             echo "• Restart:      docker restart pulsevpn-server"
@@ -180,7 +195,5 @@ else
         echo "❌ Installation failed. Check the error above."
         exit 1
     fi
-    
-    # Очистка
     rm -f "$temp_file"
 fi
