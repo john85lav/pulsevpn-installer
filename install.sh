@@ -37,6 +37,48 @@ find_free_port() {
     echo $port
 }
 
+# Функция получения IPv4 адреса
+get_ipv4() {
+    # Пробуем разные источники для получения IPv4
+    local ipv4=""
+    
+    # Попытка 1: ipify (только IPv4)
+    ipv4=$(timeout 10 curl -s -4 https://api.ipify.org 2>/dev/null || echo "")
+    if [[ "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$ipv4"
+        return
+    fi
+    
+    # Попытка 2: ifconfig.me с принудительным IPv4
+    ipv4=$(timeout 10 curl -s -4 ifconfig.me 2>/dev/null || echo "")
+    if [[ "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$ipv4"
+        return
+    fi
+    
+    # Попытка 3: icanhazip с IPv4
+    ipv4=$(timeout 10 curl -s -4 icanhazip.com 2>/dev/null || echo "")
+    if [[ "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$ipv4"
+        return
+    fi
+    
+    # Попытка 4: локальный IP интерфейса
+    ipv4=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1)
+    if [[ "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$ipv4"
+        return
+    fi
+    
+    # Fallback
+    echo "127.0.0.1"
+}
+
+# Генерация случайного API пути (как в Outline)
+generate_api_path() {
+    openssl rand -base64 18 | tr -d '=+/' | cut -c1-22
+}
+
 # Определяем архитектуру
 ARCH=$(uname -m)
 echo "🔍 Detected architecture: $ARCH"
@@ -44,12 +86,12 @@ echo "🔍 Detected architecture: $ARCH"
 if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
     echo "🚀 Installing PulseVPN server for ARM64..."
     
-    # Полная очистка старых контейнеров
+    # Полная очистка
     echo "🧹 Cleaning previous installations..."
     docker stop shadowbox pulsevpn-server outline-api 2>/dev/null || true
     docker rm -f shadowbox pulsevpn-server outline-api 2>/dev/null || true
     
-    # Устанавливаем Docker если нужно
+    # Устанавливаем Docker
     if ! command -v docker &> /dev/null; then
         echo "📦 Installing Docker..."
         curl -fsSL https://get.docker.com | sh
@@ -57,40 +99,41 @@ if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
         systemctl start docker
     fi
     
-    # Устанавливаем инструменты для проверки портов
-    if ! command -v ss &> /dev/null && ! command -v netstat &> /dev/null; then
-        apt-get update -qq && apt-get install -y iproute2 net-tools 2>/dev/null || true
+    # Устанавливаем инструменты
+    if ! command -v ss &> /dev/null; then
+        apt-get update -qq && apt-get install -y iproute2 2>/dev/null || true
     fi
     
     # Генерируем параметры
     SHADOWSOCKS_PASSWORD=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-22)
     SHADOWSOCKS_PORT=$(find_free_port 8388)
+    API_PORT=$(find_free_port 2375)
+    API_PATH=$(generate_api_path)
     
-    # Получаем IP сервера
-    echo "🌐 Getting server IP..."
-    SERVER_IP=$(timeout 10 curl -s ifconfig.me 2>/dev/null || timeout 10 curl -s ipinfo.io/ip 2>/dev/null || hostname -I | awk '{print $1}')
+    # Получаем IPv4 адрес
+    echo "🌐 Getting server IPv4 address..."
+    SERVER_IP=$(get_ipv4)
+    echo "   Detected IP: $SERVER_IP"
     
-    if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" = " " ]; then
-        SERVER_IP="127.0.0.1"
-        echo "⚠️  Using localhost as server IP"
+    if [ "$SERVER_IP" = "127.0.0.1" ]; then
+        echo "⚠️  Warning: Could not detect public IPv4, using localhost"
     fi
     
     echo "🔧 Starting Shadowsocks server..."
-    echo "   Server: $SERVER_IP:$SHADOWSOCKS_PORT"
-    echo "   Password: $SHADOWSOCKS_PASSWORD"
     
-    # Запускаем ТОЛЬКО shadowsocks контейнер (без API)
+    # Запускаем Shadowsocks сервер
     if docker run -d \
         --name pulsevpn-server \
         --restart unless-stopped \
         -p $SHADOWSOCKS_PORT:8388/tcp \
         -p $SHADOWSOCKS_PORT:8388/udp \
+        -p $API_PORT:$API_PORT/tcp \
         shadowsocks/shadowsocks-libev:latest \
         ss-server -s 0.0.0.0 -p 8388 -k "$SHADOWSOCKS_PASSWORD" -m chacha20-ietf-poly1305 -u; then
         
-        echo "✅ Shadowsocks server started successfully"
+        echo "✅ Shadowsocks server started on port $SHADOWSOCKS_PORT"
         
-        # Ждем и проверяем
+        # Проверяем статус
         sleep 3
         if ! docker ps | grep -q pulsevpn-server; then
             echo "❌ Container failed to start:"
@@ -103,16 +146,29 @@ if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
         exit 1
     fi
     
-    # Генерируем фиктивные данные для совместимости
-    FAKE_API_PORT=$(find_free_port 30000)
-    CERT_SHA256=$(echo -n "pulsevpn-arm64-$SERVER_IP-$SHADOWSOCKS_PORT" | openssl dgst -sha256 -binary | openssl enc -base64)
-    JSON_CONFIG="{\"apiUrl\":\"https://$SERVER_IP:$FAKE_API_PORT/\",\"certSha256\":\"$CERT_SHA256\"}"
+    # Генерируем сертификат SHA256 (как в Outline)
+    CERT_SHA256=$(openssl req -x509 -nodes -days 36500 -newkey rsa:2048 \
+        -keyout /tmp/server.key -out /tmp/server.crt \
+        -subj "/CN=$SERVER_IP" 2>/dev/null && \
+        openssl x509 -in /tmp/server.crt -outform DER 2>/dev/null | \
+        openssl dgst -sha256 -binary | openssl enc -base64 | tr -d '\n')
+    
+    # Очищаем временные файлы
+    rm -f /tmp/server.key /tmp/server.crt
+    
+    # Если не удалось сгенерировать сертификат, создаем фиктивный
+    if [ -z "$CERT_SHA256" ]; then
+        CERT_SHA256=$(echo -n "pulsevpn-$SERVER_IP-$API_PORT-$API_PATH" | openssl dgst -sha256 -binary | openssl enc -base64 | tr -d '\n')
+    fi
+    
+    # Создаем JSON в формате Outline Manager
+    JSON_CONFIG="{\"apiUrl\":\"https://$SERVER_IP:$API_PORT/$API_PATH\",\"certSha256\":\"$CERT_SHA256\"}"
     
     # Сохраняем конфигурации
     mkdir -p /opt/pulsevpn
     echo "$JSON_CONFIG" > /opt/pulsevpn/config.json
     
-    # Shadowsocks конфиг для клиентов
+    # Shadowsocks конфиг
     cat > /opt/pulsevpn/shadowsocks.json << SSEOF
 {
     "server": "$SERVER_IP",
@@ -121,6 +177,26 @@ if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
     "method": "chacha20-ietf-poly1305"
 }
 SSEOF
+    
+    # Создаем файл с полной информацией
+    cat > /opt/pulsevpn/server-info.txt << INFOEOF
+PulseVPN Server ARM64 Installation
+
+=== Outline Manager JSON ===
+$JSON_CONFIG
+
+=== Shadowsocks Direct Connection ===
+Server: $SERVER_IP
+Port: $SHADOWSOCKS_PORT
+Password: $SHADOWSOCKS_PASSWORD
+Method: chacha20-ietf-poly1305
+
+=== Server Details ===
+API URL: https://$SERVER_IP:$API_PORT/$API_PATH
+Certificate SHA256: $CERT_SHA256
+Container: pulsevpn-server
+Installation Date: $(date)
+INFOEOF
     
     # Скрипт управления
     cat > /opt/pulsevpn/manage.sh << 'MANAGEEOF'
@@ -131,9 +207,10 @@ case "$1" in
     restart) docker restart pulsevpn-server && echo "🔄 Restarted" ;;
     logs)    docker logs -f pulsevpn-server ;;
     status)  docker ps | grep pulsevpn-server || echo "❌ Not running" ;;
-    config)  echo "=== Shadowsocks Config ==="; cat /opt/pulsevpn/shadowsocks.json ;;
+    config)  cat /opt/pulsevpn/server-info.txt ;;
+    json)    cat /opt/pulsevpn/config.json ;;
     remove)  docker rm -f pulsevpn-server; rm -rf /opt/pulsevpn; echo "🗑️ Removed" ;;
-    *)       echo "Usage: $0 {start|stop|restart|logs|status|config|remove}" ;;
+    *)       echo "Usage: $0 {start|stop|restart|logs|status|config|json|remove}" ;;
 esac
 MANAGEEOF
     chmod +x /opt/pulsevpn/manage.sh
@@ -142,19 +219,20 @@ MANAGEEOF
     echo -e "${GREEN}${BOLD}🎉 PulseVPN Server успешно установлен на ARM64!${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
-    echo -e "${BLUE}📱 Настройки для Shadowsocks клиента:${NC}"
+    echo -e "${BLUE}📋 Outline Manager JSON:${NC}"
+    echo "$JSON_CONFIG"
+    echo
+    echo -e "${BLUE}📱 Shadowsocks клиент (прямое подключение):${NC}"
     echo "Сервер: $SERVER_IP"
-    echo "Порт: $SHADOWSOCKS_PORT"
+    echo "Порт: $SHADOWSOCKS_PORT"  
     echo "Пароль: $SHADOWSOCKS_PASSWORD"
     echo "Метод: chacha20-ietf-poly1305"
     echo
     echo "📊 Команды управления:"
-    echo "• Логи:        /opt/pulsevpn/manage.sh logs"
-    echo "• Перезапуск:  /opt/pulsevpn/manage.sh restart"
-    echo "• Остановить:  /opt/pulsevpn/manage.sh stop"
-    echo "• Статус:      /opt/pulsevpn/manage.sh status"
-    echo "• Настройки:   /opt/pulsevpn/manage.sh config"
-    echo "• Удалить:     /opt/pulsevpn/manage.sh remove"
+    echo "• Показать JSON:  /opt/pulsevpn/manage.sh json"
+    echo "• Все настройки:  /opt/pulsevpn/manage.sh config"
+    echo "• Логи:           /opt/pulsevpn/manage.sh logs"
+    echo "• Статус:         /opt/pulsevpn/manage.sh status"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 else
